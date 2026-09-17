@@ -263,6 +263,11 @@ fn save_cover_key(key: &str) {
     }
 }
 
+/// Remove the saved key. Only ever the key this window itself wrote.
+fn forget_cover_key() {
+    let _ = std::fs::remove_file(cover_key_path());
+}
+
 fn load_ignored_candidates() -> BTreeSet<String> {
     std::fs::read_to_string(ignored_candidates_path())
         .map(|text| {
@@ -403,6 +408,7 @@ enum CoverAction {
     Find(String, String),
     Apply(String, u64),
     ClosePicker,
+    OpenSettings,
 }
 
 struct App {
@@ -712,6 +718,7 @@ impl App {
             CoverAction::Find(slug, name) => self.open_cover_picker(&slug, &name),
             CoverAction::Apply(slug, id) => self.apply_cover(&slug, id),
             CoverAction::ClosePicker => self.cover_picker = None,
+            CoverAction::OpenSettings => self.screen = Screen::Settings,
         }
     }
 
@@ -860,6 +867,9 @@ impl App {
                 }
                 if secondary_button_enabled(ui, "Refresh", !busy).clicked() {
                     action = Some(CoverAction::Refresh);
+                }
+                if secondary_button_enabled(ui, "Change API key", !busy).clicked() {
+                    action = Some(CoverAction::OpenSettings);
                 }
                 if busy {
                     ui.spinner();
@@ -2007,6 +2017,60 @@ impl App {
         });
         ui.add_space(10.0);
 
+        surface_card(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new("Cover art").size(17.0).strong());
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(
+                    "Cover art for Lutris games is fetched from SteamGridDB and needs a free \
+                     API key. The key is saved for this user only and is never sent anywhere \
+                     except SteamGridDB.",
+                )
+                .weak(),
+            );
+            ui.add_space(8.0);
+            ui.label(if self.cover_key_ok {
+                egui::RichText::new("A SteamGridDB API key is saved.").strong()
+            } else {
+                egui::RichText::new("No API key is saved yet.").strong()
+            });
+            ui.add_space(4.0);
+            ui.hyperlink_to(
+                "Get a SteamGridDB API key",
+                "https://www.steamgriddb.com/profile/preferences/api",
+            );
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.cover_key_input)
+                        .password(true)
+                        .desired_width(300.0)
+                        .hint_text(if self.cover_key_ok {
+                            "Paste a new key to replace it"
+                        } else {
+                            "Paste the key here"
+                        }),
+                );
+                let entered = !self.cover_key_input.trim().is_empty();
+                if primary_button_enabled(ui, "Save key", entered).clicked() {
+                    save_cover_key(self.cover_key_input.trim());
+                    self.cover_key_input.clear();
+                    self.cover_key_ok = true;
+                    self.refresh_covers();
+                }
+                if self.cover_key_ok
+                    && secondary_button_enabled(ui, "Forget key", true).clicked()
+                {
+                    forget_cover_key();
+                    self.cover_key_input.clear();
+                    self.cover_key_ok = false;
+                    self.covers_missing = None;
+                }
+            });
+        });
+        ui.add_space(10.0);
+
         self.data_location_row(ui);
 
         ui.add_space(4.0);
@@ -2016,7 +2080,7 @@ impl App {
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(
-                    "Appearance is saved for the next launch. Data location changes apply to the next scan. Hidden Lutris results can be restored from the Lutris page.",
+                    "Appearance is saved for the next launch. Data location changes apply to the next scan. The cover art API key is saved for next time. Hidden Lutris results can be restored from the Lutris page.",
                 )
                 .weak(),
             );
@@ -2379,13 +2443,6 @@ impl App {
             Some(Ok(_)) => {}
         }
 
-        // Cover art belongs to Lutris, so it is only offered once Lutris is
-        // known to be there.
-        if matches!(self.lutris, Some(Ok(_))) {
-            self.cover_art_card(ui);
-            ui.add_space(10.0);
-        }
-
         surface_card(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(egui::RichText::new("Search locations").size(16.0).strong());
@@ -2477,6 +2534,13 @@ impl App {
             });
         });
         ui.add_space(10.0);
+
+        // Cover art is secondary to finding games: the panel sits after the
+        // search and scan controls, not above them.
+        if matches!(self.lutris, Some(Ok(_))) {
+            self.cover_art_card(ui);
+            ui.add_space(10.0);
+        }
 
         if self.candidates.is_empty() {
             surface_card(ui, |ui| {
