@@ -198,8 +198,9 @@ To see how much space the moved data uses:
 
 The window shows library status, explains what needs attention, previews each
 repair, and runs the same operations as the command-line tool. It also has
-the Lutris scan and import flow, and a **Cover art** panel that fetches missing
-covers and lets you choose the right match by its cover.
+the Lutris scan and import flow. On the Lutris page, the **Cover art** panel
+can automatically download covers for every game that is missing one, and lets
+you choose the right match by its cover when the automatic match is wrong.
 
 ## Import games into Lutris
 
@@ -254,6 +255,12 @@ chmod 600 ~/.local/share/librarybridge/sgdb-api-key
 
 `SGDB_API_KEY` and `--apikey PATH` also work. The key is never written anywhere
 else.
+
+In the desktop window, open **Lutris**, save the key from **Settings** if
+needed, then click **Download missing** in the **Cover art** panel. LibraryBridge
+uses each game's name to choose the best SteamGridDB match and downloads one
+cover for every Lutris game that does not already have one. Use **Find art** on
+an individual game to review preview images and choose a different match.
 
 List what has no cover art. This is offline and needs no key:
 
