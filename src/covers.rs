@@ -267,7 +267,10 @@ fn run_curl(arguments: &[String]) -> Result<Vec<u8>, String> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         Err(if stderr.is_empty() {
-            format!("curl exited with status {}", output.status.code().unwrap_or(-1))
+            format!(
+                "curl exited with status {}",
+                output.status.code().unwrap_or(-1)
+            )
         } else {
             stderr
         })
@@ -304,7 +307,10 @@ mod tests {
 
     #[test]
     fn search_terms_are_url_encoded() {
-        assert_eq!(urlencode("Assassin's Creed IV"), "Assassin%27s%20Creed%20IV");
+        assert_eq!(
+            urlencode("Assassin's Creed IV"),
+            "Assassin%27s%20Creed%20IV"
+        );
         assert_eq!(urlencode("AC/DC"), "AC%2FDC");
         assert_eq!(urlencode("Portal 2"), "Portal%202");
         assert_eq!(urlencode("Half-Life_2.0~"), "Half-Life_2.0~");

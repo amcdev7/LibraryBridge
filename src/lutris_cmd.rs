@@ -747,8 +747,7 @@ fn covers(options: &Options) -> Result<i32, String> {
 
     // Listing is offline and needs no key: it only reports what is on disk.
     if options.list_covers {
-        let missing: Vec<&covers::Game> =
-            all.iter().filter(|game| game.cover.is_none()).collect();
+        let missing: Vec<&covers::Game> = all.iter().filter(|game| game.cover.is_none()).collect();
         if options.json {
             print!("{}", covers_list_json(&missing));
             return Ok(0);
@@ -757,7 +756,11 @@ fn covers(options: &Options) -> Result<i32, String> {
             println!("Every game in Lutris already has cover art.");
             return Ok(0);
         }
-        println!("{} of {} games have no cover art:", missing.len(), all.len());
+        println!(
+            "{} of {} games have no cover art:",
+            missing.len(),
+            all.len()
+        );
         for game in &missing {
             println!("  {}  ({})", game.name, game.slug);
         }
@@ -777,14 +780,13 @@ fn covers(options: &Options) -> Result<i32, String> {
     })?;
 
     // A pinned id is checked once, not per game, so a typo fails immediately.
-    let wanted_id: Option<u64> = match &options.cover_match {
-        Some(value) => Some(
-            value
-                .parse()
-                .map_err(|_| format!("--match takes a SteamGridDB id (a number), not '{value}'"))?,
-        ),
-        None => None,
-    };
+    let wanted_id: Option<u64> =
+        match &options.cover_match {
+            Some(value) => Some(value.parse().map_err(|_| {
+                format!("--match takes a SteamGridDB id (a number), not '{value}'")
+            })?),
+            None => None,
+        };
     // Picking a cover by id is an explicit choice, so it replaces whatever is
     // there without also needing --overwrite.
     let replace = options.overwrite || wanted_id.is_some();
@@ -804,7 +806,9 @@ fn covers(options: &Options) -> Result<i32, String> {
                     ))
                 }
                 count => {
-                    return Err(format!("'{wanted}' matches {count} games. Use the full slug."))
+                    return Err(format!(
+                        "'{wanted}' matches {count} games. Use the full slug."
+                    ))
                 }
             }
         }

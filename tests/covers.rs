@@ -51,7 +51,10 @@ impl Fixture {
     /// A Lutris entry, as Lutris writes one: the display name and the slug the
     /// cover is looked up by.
     fn game(&self, slug: &str, name: &str) {
-        let path = self.lutris.join("games").join(format!("{slug}-1700000000.yml"));
+        let path = self
+            .lutris
+            .join("games")
+            .join(format!("{slug}-1700000000.yml"));
         fs::write(
             &path,
             format!("name: '{name}'\ngame_slug: {slug}\nversion: test\nrunner: wine\n"),
@@ -136,7 +139,10 @@ esac
     }
 
     fn cover_exists(&self, slug: &str) -> bool {
-        self.lutris.join("coverart").join(format!("{slug}.jpg")).is_file()
+        self.lutris
+            .join("coverart")
+            .join(format!("{slug}.jpg"))
+            .is_file()
     }
 }
 
@@ -269,7 +275,10 @@ fn matches_are_listed_with_previews_and_change_nothing() {
     let text = stdout(&output);
     assert!(text.contains("\"id\": 20"), "{text}");
     assert!(text.contains("\"id\": 21"), "{text}");
-    assert!(text.contains("https://cdn.example/delta-thumb.jpg"), "{text}");
+    assert!(
+        text.contains("https://cdn.example/delta-thumb.jpg"),
+        "{text}"
+    );
     assert!(!fixture.cover_exists("delta"), "nothing should be written");
     assert_eq!(fixture.downloaded_url(), None);
 }
@@ -282,7 +291,11 @@ fn a_missing_key_is_explained_rather_than_guessed_at() {
 
     let output = fixture.run(&["lutris", "covers", "--json"]);
     assert!(!output.status.success());
-    assert!(stderr(&output).contains("SteamGridDB API key"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("SteamGridDB API key"),
+        "{}",
+        stderr(&output)
+    );
     assert!(!fixture.cover_exists("alpha"));
 }
 

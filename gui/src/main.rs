@@ -682,7 +682,9 @@ impl App {
         let data_dir = self.data_dir.clone();
         let slug = slug.to_string();
         backend::spawn(sender, move |tx| {
-            let _ = tx.send(Update::CoverNotice(backend::cover_apply(&slug, id, &data_dir)));
+            let _ = tx.send(Update::CoverNotice(backend::cover_apply(
+                &slug, id, &data_dir,
+            )));
         });
     }
 
@@ -702,7 +704,9 @@ impl App {
         let sender = self.sender.clone();
         let running = self.running.clone();
         let data_dir = self.data_dir.clone();
-        backend::spawn(sender, move |tx| backend::stream(&tx, &arguments, &running, &data_dir));
+        backend::spawn(sender, move |tx| {
+            backend::stream(&tx, &arguments, &running, &data_dir)
+        });
     }
 
     fn apply_cover_action(&mut self, action: CoverAction) {
@@ -838,10 +842,8 @@ impl App {
                                         .clicked(),
                                 };
                                 if chosen {
-                                    action = Some(CoverAction::Apply(
-                                        picker.slug.clone(),
-                                        candidate.id,
-                                    ));
+                                    action =
+                                        Some(CoverAction::Apply(picker.slug.clone(), candidate.id));
                                 }
                             }
                         });
@@ -891,17 +893,12 @@ impl App {
                 for game in games {
                     ui.horizontal(|ui| {
                         ui.label(&game.name);
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if secondary_button_enabled(ui, "Find art", !busy).clicked() {
-                                    action = Some(CoverAction::Find(
-                                        game.slug.clone(),
-                                        game.name.clone(),
-                                    ));
-                                }
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if secondary_button_enabled(ui, "Find art", !busy).clicked() {
+                                action =
+                                    Some(CoverAction::Find(game.slug.clone(), game.name.clone()));
+                            }
+                        });
                     });
                 }
             }
@@ -1329,8 +1326,7 @@ impl App {
                     if let Ok(decoded) = image::load_from_memory(&bytes) {
                         let rgba = decoded.to_rgba8();
                         let size = [rgba.width() as usize, rgba.height() as usize];
-                        let image =
-                            egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                        let image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
                         let handle = ctx.load_texture(
                             format!("cover-thumb-{id}"),
                             image,
@@ -2059,9 +2055,7 @@ impl App {
                     self.cover_key_ok = true;
                     self.refresh_covers();
                 }
-                if self.cover_key_ok
-                    && secondary_button_enabled(ui, "Forget key", true).clicked()
-                {
+                if self.cover_key_ok && secondary_button_enabled(ui, "Forget key", true).clicked() {
                     forget_cover_key();
                     self.cover_key_input.clear();
                     self.cover_key_ok = false;

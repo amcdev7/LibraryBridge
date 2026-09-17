@@ -233,15 +233,26 @@ pub enum Phase {
     Preparing,
     LutrisPreparing,
     OpeningLutris,
-    AddingGames { done: u64, total: u64 },
-    Copying { total_bytes: u64 },
-    Progress { files: u64, bytes: u64 },
+    AddingGames {
+        done: u64,
+        total: u64,
+    },
+    Copying {
+        total_bytes: u64,
+    },
+    Progress {
+        files: u64,
+        bytes: u64,
+    },
     Verifying,
     Committing,
     Applied,
     /// Cover art is being fetched. Safe to stop at any point: a cover is one
     /// file and a half-written one is never left in place.
-    Covers { done: u64, total: u64 },
+    Covers {
+        done: u64,
+        total: u64,
+    },
 }
 
 impl Phase {
