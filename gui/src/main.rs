@@ -1573,6 +1573,15 @@ impl App {
         self.back_to = Screen::Home;
         self.screen = screen;
     }
+
+    fn lutris_add_ready(&self) -> bool {
+        !self.busy
+            && matches!(self.lutris, Some(Ok(_)))
+            && self.selected.iter().any(|id| {
+                self.candidate(id)
+                    .is_some_and(|candidate| candidate.eligible)
+            })
+    }
 }
 
 // ------------------------------------------------------------------ rendering
@@ -1649,6 +1658,17 @@ impl eframe::App for App {
             });
             ui.add_space(6.0);
         });
+
+        // Keep the commit action visible once the user has selected something
+        // that can actually be added. The results remain in the page scroll,
+        // but the next step stays anchored above the status bar.
+        if matches!(self.screen, Screen::Games) && self.lutris_add_ready() {
+            egui::TopBottomPanel::bottom("lutris-add-bar").show(ctx, |ui| {
+                ui.add_space(6.0);
+                centered_content(ui, 940.0, |ui| self.games_action_card(ui));
+                ui.add_space(6.0);
+            });
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // The home page's chart reads better a little wider; the detail
@@ -2673,12 +2693,18 @@ impl App {
             }
         }
 
+        if !self.lutris_add_ready() {
+            self.games_action_card(ui);
+        }
+    }
+
+    fn games_action_card(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         surface_card(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
                 let count = self.selected.len();
-                let ready = count > 0 && !self.busy && matches!(self.lutris, Some(Ok(_)));
+                let ready = self.lutris_add_ready();
                 if primary_button_enabled(ui, &format!("Add {count} to Lutris"), ready).clicked() {
                     self.back_to = Screen::Games;
                     self.import_selected();
