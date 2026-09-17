@@ -885,30 +885,25 @@ impl App {
 
             if missing_count > 0 {
                 ui.add_space(6.0);
-                let height = ui.available_height().clamp(120.0, 220.0);
-                egui::ScrollArea::vertical()
-                    .id_salt("cover-art-missing")
-                    .max_height(height)
-                    .show(ui, |ui| {
-                        for game in games {
-                            ui.horizontal(|ui| {
-                                ui.label(&game.name);
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if secondary_button_enabled(ui, "Find art", !busy)
-                                            .clicked()
-                                        {
-                                            action = Some(CoverAction::Find(
-                                                game.slug.clone(),
-                                                game.name.clone(),
-                                            ));
-                                        }
-                                    },
-                                );
-                            });
-                        }
+                // The Lutris screen owns the page scroll. Keeping this list
+                // in that same scroll area means the cover-art panel does not
+                // create a second, cramped scroll region inside the page.
+                for game in games {
+                    ui.horizontal(|ui| {
+                        ui.label(&game.name);
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if secondary_button_enabled(ui, "Find art", !busy).clicked() {
+                                    action = Some(CoverAction::Find(
+                                        game.slug.clone(),
+                                        game.name.clone(),
+                                    ));
+                                }
+                            },
+                        );
                     });
+                }
             }
         });
 
@@ -1689,7 +1684,12 @@ impl eframe::App for App {
                     Screen::Review { id, action, title } => {
                         self.review_screen(ui, &id, action, &title)
                     }
-                    Screen::Games => self.games_screen(ui),
+                    Screen::Games => {
+                        egui::ScrollArea::vertical()
+                            .id_salt("lutris-page")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.games_screen(ui));
+                    }
                     Screen::Storage => self.storage_screen(ui),
                     Screen::Settings => self.settings_screen(ui),
                     Screen::Help => self.help_screen(ui),
@@ -2573,120 +2573,111 @@ impl App {
         let can_add = |candidate: &backend::Candidate| candidate.eligible;
         let is_steam = |candidate: &backend::Candidate| candidate.source == "steam";
 
-        // Leave room for the action row below, whatever the window height is.
-        let list_height = (ui.available_height() - 108.0).max(160.0);
-        egui::ScrollArea::vertical()
-            .max_height(list_height)
-            .show(ui, |ui| {
-                // 1. Games that can actually be added (grouped by confidence).
-                let addable: Vec<backend::Candidate> = self
-                    .candidates
-                    .iter()
-                    .filter(|c| can_add(c))
-                    .cloned()
-                    .collect();
-                let already = self
-                    .candidates
-                    .iter()
-                    .filter(|c| c.in_lutris && c.source != "steam")
-                    .count();
-                if addable.is_empty() {
-                    ui.label(
-                        egui::RichText::new("No games can be added from what was found.").weak(),
-                    );
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{} can be added to Lutris",
-                                addable.len(),
-                            ))
-                            .size(15.0)
-                            .strong(),
-                        );
-                        if already > 0 {
-                            ui.label(
-                                egui::RichText::new(format!("({already} already added)"))
-                                    .size(15.0)
-                                    .color(egui::Color32::from_rgb(0x2E, 0x7D, 0x32))
-                                    .strong(),
-                            );
-                        }
-                    });
-                }
-                for level in ["high", "medium", "low"] {
-                    let group: Vec<String> = all
-                        .iter()
-                        .filter(|id| {
-                            self.candidates
-                                .iter()
-                                .any(|c| &&c.id == id && c.confidence == level && can_add(c))
-                        })
-                        .cloned()
-                        .collect();
-                    if group.is_empty() {
-                        continue;
-                    }
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new(confidence_heading(level)).strong());
-                    ui.add_space(4.0);
-                    for id in group {
-                        self.candidate_row(ui, &id, level);
-                    }
-                }
-
-                // 2. Games already in Lutris, so the page shows what has been added. Always
-                // shown: the point of the page is finding what is missing, but
-                // the "what is already there" half is just as important.
-                {
-                    let known: Vec<String> = all
-                        .iter()
-                        .filter(|id| {
-                            self.candidates
-                                .iter()
-                                .any(|c| &&c.id == id && c.in_lutris && c.source != "steam")
-                        })
-                        .cloned()
-                        .collect();
-                    if !known.is_empty() {
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(4.0);
-                        ui.colored_label(
-                            egui::Color32::from_rgb(0x2E, 0x7D, 0x32),
-                            format!("Already in Lutris ({} — these are set up)", known.len(),),
-                        );
-                        ui.add_space(4.0);
-                        for id in known {
-                            self.candidate_row(ui, &id, "low");
-                        }
-                    }
-                }
-
-                // 3. Steam games, for reference only, at the bottom.
-                let steam: Vec<String> = all
-                    .iter()
-                    .filter(|id| self.candidates.iter().any(|c| &&c.id == id && is_steam(c)))
-                    .cloned()
-                    .collect();
-                if !steam.is_empty() {
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Steam games ({} — shown for reference, not addable)",
-                            steam.len(),
-                        ))
+        // The whole Lutris page scrolls as one surface. This keeps the search
+        // controls, cover-art panel, game results, and final action reachable
+        // together, even when either list is much taller than the window.
+        let addable: Vec<backend::Candidate> = self
+            .candidates
+            .iter()
+            .filter(|c| can_add(c))
+            .cloned()
+            .collect();
+        let already = self
+            .candidates
+            .iter()
+            .filter(|c| c.in_lutris && c.source != "steam")
+            .count();
+        if addable.is_empty() {
+            ui.label(egui::RichText::new("No games can be added from what was found.").weak());
+        } else {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{} can be added to Lutris", addable.len()))
                         .size(15.0)
                         .strong(),
+                );
+                if already > 0 {
+                    ui.label(
+                        egui::RichText::new(format!("({already} already added)"))
+                            .size(15.0)
+                            .color(egui::Color32::from_rgb(0x2E, 0x7D, 0x32))
+                            .strong(),
                     );
-                    ui.add_space(4.0);
-                    for id in steam {
-                        self.candidate_row(ui, &id, "low");
-                    }
                 }
             });
+        }
+        for level in ["high", "medium", "low"] {
+            let group: Vec<String> = all
+                .iter()
+                .filter(|id| {
+                    self.candidates
+                        .iter()
+                        .any(|c| &&c.id == id && c.confidence == level && can_add(c))
+                })
+                .cloned()
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(confidence_heading(level)).strong());
+            ui.add_space(4.0);
+            for id in group {
+                self.candidate_row(ui, &id, level);
+            }
+        }
+
+        // 2. Games already in Lutris, so the page shows what has been added. Always
+        // shown: the point of the page is finding what is missing, but
+        // the "what is already there" half is just as important.
+        {
+            let known: Vec<String> = all
+                .iter()
+                .filter(|id| {
+                    self.candidates
+                        .iter()
+                        .any(|c| &&c.id == id && c.in_lutris && c.source != "steam")
+                })
+                .cloned()
+                .collect();
+            if !known.is_empty() {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.colored_label(
+                    egui::Color32::from_rgb(0x2E, 0x7D, 0x32),
+                    format!("Already in Lutris ({} — these are set up)", known.len(),),
+                );
+                ui.add_space(4.0);
+                for id in known {
+                    self.candidate_row(ui, &id, "low");
+                }
+            }
+        }
+
+        // 3. Steam games, for reference only, at the bottom.
+        let steam: Vec<String> = all
+            .iter()
+            .filter(|id| self.candidates.iter().any(|c| &&c.id == id && is_steam(c)))
+            .cloned()
+            .collect();
+        if !steam.is_empty() {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Steam games ({} — shown for reference, not addable)",
+                    steam.len(),
+                ))
+                .size(15.0)
+                .strong(),
+            );
+            ui.add_space(4.0);
+            for id in steam {
+                self.candidate_row(ui, &id, "low");
+            }
+        }
 
         ui.add_space(10.0);
         surface_card(ui, |ui| {
