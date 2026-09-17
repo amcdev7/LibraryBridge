@@ -12,6 +12,9 @@
 .env.*
 !.env.example
 
+# Local SteamGridDB cover tooling (contains API key)
+/lutris-covers/
+
 # Editor and operating-system metadata
 .idea/
 *.swp

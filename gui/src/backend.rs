@@ -239,6 +239,9 @@ pub enum Phase {
     Verifying,
     Committing,
     Applied,
+    /// Cover art is being fetched. Safe to stop at any point: a cover is one
+    /// file and a half-written one is never left in place.
+    Covers { done: u64, total: u64 },
 }
 
 impl Phase {
@@ -254,6 +257,7 @@ impl Phase {
                 | Phase::Copying { .. }
                 | Phase::Progress { .. }
                 | Phase::Verifying
+                | Phase::Covers { .. }
         )
     }
 
@@ -267,6 +271,7 @@ impl Phase {
             Phase::Verifying => "Checking every file",
             Phase::Committing => "Switching over",
             Phase::Applied => "Finished",
+            Phase::Covers { .. } => "Fetching cover art",
         }
     }
 }
@@ -295,6 +300,10 @@ fn parse_event(line: &str) -> Option<Phase> {
         "verifying" => Phase::Verifying,
         "committing" => Phase::Committing,
         "applied" => Phase::Applied,
+        "cover" => Phase::Covers {
+            done: count("done"),
+            total: count("total"),
+        },
         _ => return None,
     })
 }
@@ -310,6 +319,17 @@ pub enum Update {
     Storage(Result<Vec<Stored>, String>),
     Evidence(Result<Vec<EvidenceRow>, String>),
     Lutris(Result<String, String>),
+    /// Which Lutris games have no cover art.
+    Covers(Result<Vec<CoverGame>, String>),
+    /// SteamGridDB candidates for one game, to choose from.
+    CoverCandidates(Result<CoverCandidates, String>),
+    /// A decoded preview image for one candidate.
+    CoverThumb {
+        id: u64,
+        result: Result<Vec<u8>, String>,
+    },
+    /// A single cover was written (or not).
+    CoverNotice(Result<(), String>),
     /// One line of output from a running command.
     Line(String),
     /// A phase change or progress report from a running command.
@@ -712,5 +732,122 @@ pub fn describe_evidence(field: &str) -> &'static str {
         "launch" => "The game starts",
         "save" => "A save loads, and a new one is kept",
         _ => "Steam Cloud still syncs",
+    }
+}
+
+// -------------------------------------------------------------------- covers
+
+/// A Lutris game with no cover art, as `lutris covers --list` reports it.
+#[derive(Debug, Clone, Default)]
+pub struct CoverGame {
+    pub slug: String,
+    pub name: String,
+}
+
+/// One SteamGridDB search result for a game.
+#[derive(Debug, Clone, Default)]
+pub struct CoverMatch {
+    pub id: u64,
+    pub name: String,
+    /// Preview image URL. Public, so no key is needed to fetch it.
+    pub thumb: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CoverCandidates {
+    /// The search text that was actually sent, which differs from the game
+    /// name when a query was given.
+    pub query: String,
+    pub matches: Vec<CoverMatch>,
+}
+
+/// Which Lutris games have no cover art. Offline: no key, no network.
+pub fn covers_missing(data_dir: &str) -> Result<Vec<CoverGame>, String> {
+    let out = run(
+        &[
+            "lutris".into(),
+            "covers".into(),
+            "--list".into(),
+            "--json".into(),
+        ],
+        data_dir,
+    )?;
+    let parsed: Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+    Ok(parsed
+        .get("missing")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|row| CoverGame {
+            slug: text(row, "slug"),
+            name: text(row, "name"),
+        })
+        .collect())
+}
+
+/// Search SteamGridDB for a game, previews included.
+pub fn cover_candidates(slug: &str, data_dir: &str) -> Result<CoverCandidates, String> {
+    let out = run(
+        &[
+            "lutris".into(),
+            "covers".into(),
+            "--game".into(),
+            slug.into(),
+            "--matches".into(),
+            "--json".into(),
+        ],
+        data_dir,
+    )?;
+    let parsed: Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+    let matches = parsed
+        .get("matches")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|row| CoverMatch {
+            id: row.get("id").and_then(Value::as_u64).unwrap_or(0),
+            name: text(row, "name"),
+            thumb: text(row, "thumb"),
+        })
+        .collect();
+    Ok(CoverCandidates {
+        query: text(&parsed, "query"),
+        matches,
+    })
+}
+
+/// Set one specific cover. Picking by id replaces whatever is there.
+pub fn cover_apply(slug: &str, id: u64, data_dir: &str) -> Result<(), String> {
+    run(
+        &[
+            "lutris".into(),
+            "covers".into(),
+            "--game".into(),
+            slug.into(),
+            "--match".into(),
+            id.to_string(),
+        ],
+        data_dir,
+    )
+    .map(|_| ())
+}
+
+/// Fetch a preview image. Thumbnails are public CDN URLs, so no key is needed.
+pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let output = Command::new("curl")
+        .args(["-sS", "--fail", "-L", url])
+        .output()
+        .map_err(|e| format!("could not run curl: {e}"))?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            "the preview could not be fetched".to_string()
+        } else {
+            stderr
+        })
     }
 }

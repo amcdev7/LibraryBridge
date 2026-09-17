@@ -40,6 +40,28 @@ impl Installation {
         self.config_dir.join("games")
     }
 
+    /// The games Lutris itself lists, as `(slug, display name)`.
+    ///
+    /// This is the authoritative set: it comes from Lutris rather than from the
+    /// config files, which can hold leftovers and more than one file for the
+    /// same game. `None` when the command is unavailable or reports nothing.
+    pub fn list_games(&self) -> Option<Vec<(String, String)>> {
+        let output = self.invoke(&["--list-games", "--json"])?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let start = text.find(['[', '{'])?;
+        let parsed = json::parse(text[start..].trim()).ok()?;
+        let mut games = Vec::new();
+        for game in parsed.as_array() {
+            if let (Some(slug), Some(name)) = (game.string("slug"), game.string("name")) {
+                games.push((slug, name));
+            }
+        }
+        (!games.is_empty()).then_some(games)
+    }
+
     fn invoke(&self, extra: &[&str]) -> Option<std::process::Output> {
         let (program, leading) = self.command.split_first()?;
         Command::new(program)
@@ -281,20 +303,8 @@ pub fn existing_entries(installation: &Installation) -> Vec<Entry> {
 }
 
 fn names_from_cli(installation: &Installation) -> Option<BTreeMap<String, String>> {
-    let output = installation.invoke(&["--list-games", "--json"])?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let start = text.find(['[', '{'])?;
-    let parsed = json::parse(text[start..].trim()).ok()?;
-    let mut names = BTreeMap::new();
-    for game in parsed.as_array() {
-        if let (Some(slug), Some(name)) = (game.string("slug"), game.string("name")) {
-            names.insert(slug, name);
-        }
-    }
-    Some(names)
+    let games = installation.list_games()?;
+    Some(games.into_iter().collect())
 }
 
 /// Lutris names its config files `<slug>-<id>.yml`. Drop the trailing id.

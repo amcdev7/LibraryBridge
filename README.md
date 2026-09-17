@@ -35,11 +35,19 @@ Lutris does not know about. It shows the likely executable for each game so
 you can review the result before adding it to Lutris. Game files, prefixes,
 and saves are not moved.
 
+### Cover art
+
+Lutris often has no cover art for games it did not download from its own site.
+LibraryBridge can fetch it from [SteamGridDB](https://www.steamgriddb.com) and
+put it where Lutris looks for it. Nothing in Lutris's database is changed, and
+nothing is deleted.
+
 ## Requirements
 
 - Linux
 - Steam for the Steam repair feature
 - Lutris for the optional game import feature
+- `curl` and a free SteamGridDB API key for the optional cover art feature
 - Rust and Cargo to build from source
 - A Linux filesystem with enough free space for the moved Proton data
 
@@ -190,7 +198,8 @@ To see how much space the moved data uses:
 
 The window shows library status, explains what needs attention, previews each
 repair, and runs the same operations as the command-line tool. It also has
-the Lutris scan and import flow.
+the Lutris scan and import flow, and a **Cover art** panel that fetches missing
+covers and lets you choose the right match by its cover.
 
 ## Import games into Lutris
 
@@ -225,6 +234,56 @@ plan and pass it to Lutris:
 Lutris opens its own installer dialog for each game. Steam games are not
 imported because Lutris already lists them through its Steam integration.
 
+## Cover art for Lutris games
+
+Lutris reads a game's cover from its own `coverart` directory, named after the
+game's slug. LibraryBridge fetches missing art from SteamGridDB and puts it
+there. Nothing in Lutris's database is changed, and nothing is deleted.
+
+Covers are fetched with `curl`, so it must be installed. A free SteamGridDB API
+key is required; get one at
+[steamgriddb.com/profile/preferences/api](https://www.steamgriddb.com/profile/preferences/api).
+
+Save the key in the desktop window (it is kept for next time), or on the
+command line:
+
+```bash
+echo 'YOUR_API_KEY' > ~/.local/share/librarybridge/sgdb-api-key
+chmod 600 ~/.local/share/librarybridge/sgdb-api-key
+```
+
+`SGDB_API_KEY` and `--apikey PATH` also work. The key is never written anywhere
+else.
+
+List what has no cover art. This is offline and needs no key:
+
+```bash
+./target/release/librarybridge lutris covers --list
+```
+
+Fetch art for every game that has none:
+
+```bash
+./target/release/librarybridge lutris covers
+```
+
+For one game, or to choose the match yourself:
+
+```bash
+# Search and list the candidates, with preview links, downloading nothing
+./target/release/librarybridge lutris covers --game <slug> --matches
+
+# Use a specific candidate by its id
+./target/release/librarybridge lutris covers --game <slug> --match <id>
+
+# Search with different text, or replace art that is already there
+./target/release/librarybridge lutris covers --game <slug> --query "Exact Name" --overwrite
+```
+
+The search text defaults to the game's display name. When the automatic choice
+is wrong, the desktop window's **Cover art** panel shows the candidates with
+their covers so you can pick the right one. Restart Lutris to see new covers.
+
 ## Safety and recovery
 
 - `scan`, `storage`, and `--dry-run` do not change files.
@@ -235,6 +294,8 @@ imported because Lutris already lists them through its Steam integration.
   and requires evidence that the game launched and saved successfully.
 - An interrupted repair can be reviewed again. Unfinished data is kept rather
   than deleted automatically.
+- `lutris covers` writes one image file into Lutris's own `coverart` directory.
+  It changes nothing else, and it never deletes a cover.
 
 ## Limitations
 
@@ -244,6 +305,9 @@ imported because Lutris already lists them through its Steam integration.
   preserved by the copy
 - A successful repair fixes the location of Proton data. It does not guarantee
   that a particular game will run
+- Cover art needs network access and a SteamGridDB API key, and the automatic
+  match can choose the wrong game; pick the right one from the window, or with
+  `--match`
 
 ## Troubleshooting
 

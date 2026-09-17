@@ -11,6 +11,7 @@ mod backend;
 mod png;
 
 use std::collections::{BTreeSet, HashMap};
+use std::os::unix::fs::PermissionsExt;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use backend::{Candidate, Library, Update};
@@ -240,6 +241,28 @@ fn ignored_candidates_path() -> std::path::PathBuf {
     saved_data_dir_path().with_file_name("ignored-lutris.txt")
 }
 
+/// The SteamGridDB API key the covers panel saves, in the same directory the
+/// command line tool reads it from.
+fn cover_key_path() -> std::path::PathBuf {
+    saved_data_dir_path().with_file_name("sgdb-api-key")
+}
+
+fn cover_key_present() -> bool {
+    std::fs::read_to_string(cover_key_path())
+        .map(|text| !text.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Saved readable only by the user: it is a credential, even a free one.
+fn save_cover_key(key: &str) {
+    let file = cover_key_path();
+    let parent = file.parent().unwrap_or(std::path::Path::new("/"));
+    let _ = std::fs::create_dir_all(parent);
+    if std::fs::write(&file, format!("{}\n", key.trim())).is_ok() {
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
 fn load_ignored_candidates() -> BTreeSet<String> {
     std::fs::read_to_string(ignored_candidates_path())
         .map(|text| {
@@ -360,6 +383,28 @@ impl Action {
     }
 }
 
+/// The candidate picker for one game's cover art. Open only while choosing.
+#[derive(Clone)]
+struct CoverPicker {
+    slug: String,
+    name: String,
+    /// `None` while the search is still running.
+    candidates: Option<Result<backend::CoverCandidates, String>>,
+    /// Decoded previews, keyed by candidate id.
+    thumbs: HashMap<u64, egui::TextureHandle>,
+}
+
+/// What the cover art card asked for. Collected while drawing and applied
+/// afterwards, so the card never holds a borrow of the app while it changes it.
+enum CoverAction {
+    SaveKey(String),
+    Download,
+    Refresh,
+    Find(String, String),
+    Apply(String, u64),
+    ClosePicker,
+}
+
 struct App {
     screen: Screen,
     back_to: Screen,
@@ -429,6 +474,15 @@ struct App {
     /// The library a run is about, so its evidence can be shown afterwards.
     subject: Option<String>,
     evidence: Vec<backend::EvidenceRow>,
+
+    /// Cover art: which Lutris games have none, and the state of the panel.
+    covers_missing: Option<Result<Vec<backend::CoverGame>, String>>,
+    covers_busy: bool,
+    covers_progress: Option<(u64, u64)>,
+    covers_notice: Option<String>,
+    cover_key_input: String,
+    cover_key_ok: bool,
+    cover_picker: Option<CoverPicker>,
 
     sender: Sender<Update>,
     receiver: Receiver<Update>,
@@ -511,6 +565,17 @@ impl App {
             import_warnings: Vec::new(),
             subject: None,
             evidence: Vec::new(),
+            covers_missing: None,
+            covers_busy: false,
+            covers_progress: None,
+            covers_notice: None,
+            cover_key_input: String::new(),
+            cover_key_ok: if start.preview {
+                true
+            } else {
+                cover_key_present()
+            },
+            cover_picker: None,
             sender,
             receiver,
             icon_texture,
@@ -523,6 +588,7 @@ impl App {
         } else {
             app.refresh_libraries();
             app.refresh_lutris();
+            app.refresh_covers();
             if !app.roots.is_empty() {
                 app.refresh_candidates();
             }
@@ -559,6 +625,287 @@ impl App {
         backend::spawn(sender, move |tx| {
             let _ = tx.send(Update::Lutris(backend::lutris_status(&data_dir)));
         });
+    }
+
+    /// Which games have no cover art. Offline and cheap, so it is refreshed
+    /// alongside the rest of the Lutris state.
+    fn refresh_covers(&mut self) {
+        self.cover_key_ok = cover_key_present();
+        let sender = self.sender.clone();
+        let data_dir = self.data_dir.clone();
+        backend::spawn(sender, move |tx| {
+            let _ = tx.send(Update::Covers(backend::covers_missing(&data_dir)));
+        });
+    }
+
+    /// Search for one game's cover, loading each preview as it arrives.
+    fn open_cover_picker(&mut self, slug: &str, name: &str) {
+        self.cover_picker = Some(CoverPicker {
+            slug: slug.to_string(),
+            name: name.to_string(),
+            candidates: None,
+            thumbs: HashMap::new(),
+        });
+        self.covers_notice = None;
+        let sender = self.sender.clone();
+        let data_dir = self.data_dir.clone();
+        let slug = slug.to_string();
+        backend::spawn(sender, move |tx| {
+            let result = backend::cover_candidates(&slug, &data_dir);
+            if let Ok(candidates) = &result {
+                for candidate in &candidates.matches {
+                    if candidate.thumb.is_empty() {
+                        continue;
+                    }
+                    if let Ok(bytes) = backend::fetch_bytes(&candidate.thumb) {
+                        let _ = tx.send(Update::CoverThumb {
+                            id: candidate.id,
+                            result: Ok(bytes),
+                        });
+                    }
+                }
+            }
+            let _ = tx.send(Update::CoverCandidates(result));
+        });
+    }
+
+    fn apply_cover(&mut self, slug: &str, id: u64) {
+        self.cover_picker = None;
+        self.covers_notice = Some("Saving cover art…".to_string());
+        let sender = self.sender.clone();
+        let data_dir = self.data_dir.clone();
+        let slug = slug.to_string();
+        backend::spawn(sender, move |tx| {
+            let _ = tx.send(Update::CoverNotice(backend::cover_apply(&slug, id, &data_dir)));
+        });
+    }
+
+    fn start_cover_download(&mut self) {
+        if self.covers_busy {
+            return;
+        }
+        self.covers_busy = true;
+        self.covers_progress = Some((0, 0));
+        self.covers_notice = None;
+        self.error = None;
+        let arguments = vec![
+            "lutris".to_string(),
+            "covers".to_string(),
+            "--json".to_string(),
+        ];
+        let sender = self.sender.clone();
+        let running = self.running.clone();
+        let data_dir = self.data_dir.clone();
+        backend::spawn(sender, move |tx| backend::stream(&tx, &arguments, &running, &data_dir));
+    }
+
+    fn apply_cover_action(&mut self, action: CoverAction) {
+        match action {
+            CoverAction::SaveKey(key) => {
+                save_cover_key(&key);
+                self.cover_key_ok = true;
+                self.cover_key_input.clear();
+                self.refresh_covers();
+            }
+            CoverAction::Download => self.start_cover_download(),
+            CoverAction::Refresh => self.refresh_covers(),
+            CoverAction::Find(slug, name) => self.open_cover_picker(&slug, &name),
+            CoverAction::Apply(slug, id) => self.apply_cover(&slug, id),
+            CoverAction::ClosePicker => self.cover_picker = None,
+        }
+    }
+
+    /// The cover art panel on the Lutris screen.
+    ///
+    /// Fetching art is a SteamGridDB call, so a key is needed once. After that
+    /// it is one button for every game that has none, and a chooser for the
+    /// ones an automatic match would get wrong.
+    fn cover_art_card(&mut self, ui: &mut egui::Ui) {
+        let key_ok = self.cover_key_ok;
+        let missing = self.covers_missing.clone();
+        let picker = self.cover_picker.clone();
+        let busy = self.covers_busy;
+        let progress = self.covers_progress;
+        let notice = self.covers_notice.clone();
+        let mut key_input = std::mem::take(&mut self.cover_key_input);
+        let mut action: Option<CoverAction> = None;
+
+        surface_card(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new("Cover art").size(16.0).strong());
+            ui.add_space(4.0);
+
+            if !key_ok {
+                ui.label(
+                    egui::RichText::new(
+                        "Fetch cover art for the games in your Lutris library from \
+                         SteamGridDB. Paste a free API key and it is saved for next time.",
+                    )
+                    .weak(),
+                );
+                ui.add_space(4.0);
+                ui.hyperlink_to(
+                    "Get a SteamGridDB API key",
+                    "https://www.steamgriddb.com/profile/preferences/api",
+                );
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut key_input)
+                            .password(true)
+                            .desired_width(300.0)
+                            .hint_text("SteamGridDB API key"),
+                    );
+                    if primary_button(ui, "Save key").clicked() && !key_input.trim().is_empty() {
+                        action = Some(CoverAction::SaveKey(key_input.trim().to_string()));
+                    }
+                });
+                return;
+            }
+
+            let Some(result) = &missing else {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Checking cover art…");
+                });
+                return;
+            };
+
+            let games = match result {
+                Err(message) => {
+                    ui.label(
+                        egui::RichText::new(format!("Cover art could not be checked. {message}"))
+                            .weak(),
+                    );
+                    return;
+                }
+                Ok(games) => games,
+            };
+
+            // A chooser takes over the panel while it is open.
+            if let Some(picker) = &picker {
+                ui.label(egui::RichText::new(format!("Cover art for {}", picker.name)).strong());
+                ui.add_space(6.0);
+                match &picker.candidates {
+                    None => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Searching SteamGridDB…");
+                        });
+                    }
+                    Some(Err(message)) => {
+                        ui.label(egui::RichText::new(message).weak());
+                    }
+                    Some(Ok(candidates)) if candidates.matches.is_empty() => {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "No match was found for \"{}\".",
+                                candidates.query
+                            ))
+                            .weak(),
+                        );
+                    }
+                    Some(Ok(candidates)) => {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Choose the right one for \"{}\":",
+                                candidates.query
+                            ))
+                            .weak(),
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for candidate in &candidates.matches {
+                                let chosen = match picker.thumbs.get(&candidate.id) {
+                                    Some(texture) => {
+                                        let image = egui::Image::new((
+                                            texture.id(),
+                                            egui::vec2(96.0, 144.0),
+                                        ))
+                                        .sense(egui::Sense::click());
+                                        ui.add(image).on_hover_text(&candidate.name).clicked()
+                                    }
+                                    // No preview (yet): a labelled button still
+                                    // lets it be chosen.
+                                    None => secondary_button_enabled(ui, &candidate.name, true)
+                                        .clicked(),
+                                };
+                                if chosen {
+                                    action = Some(CoverAction::Apply(
+                                        picker.slug.clone(),
+                                        candidate.id,
+                                    ));
+                                }
+                            }
+                        });
+                    }
+                }
+                ui.add_space(6.0);
+                if secondary_button_enabled(ui, "Cancel", true).clicked() {
+                    action = Some(CoverAction::ClosePicker);
+                }
+                return;
+            }
+
+            let missing_count = games.len();
+            if missing_count == 0 {
+                ui.label(egui::RichText::new("Every game has cover art.").weak());
+            } else {
+                ui.label(format!("{missing_count} game(s) have no cover art."));
+            }
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                if primary_button_enabled(ui, "Download missing", !busy).clicked() {
+                    action = Some(CoverAction::Download);
+                }
+                if secondary_button_enabled(ui, "Refresh", !busy).clicked() {
+                    action = Some(CoverAction::Refresh);
+                }
+                if busy {
+                    ui.spinner();
+                    if let Some((done, total)) = progress {
+                        ui.label(egui::RichText::new(format!("{done}/{total}")).weak());
+                    }
+                }
+            });
+            if let Some(notice) = &notice {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(notice).weak());
+            }
+
+            if missing_count > 0 {
+                ui.add_space(6.0);
+                let height = ui.available_height().clamp(120.0, 220.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("cover-art-missing")
+                    .max_height(height)
+                    .show(ui, |ui| {
+                        for game in games {
+                            ui.horizontal(|ui| {
+                                ui.label(&game.name);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if secondary_button_enabled(ui, "Find art", !busy)
+                                            .clicked()
+                                        {
+                                            action = Some(CoverAction::Find(
+                                                game.slug.clone(),
+                                                game.name.clone(),
+                                            ));
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                    });
+            }
+        });
+
+        self.cover_key_input = key_input;
+        if let Some(action) = action {
+            self.apply_cover_action(action);
+        }
     }
 
     /// Stable sample data for visual QA. This never runs during normal use;
@@ -615,6 +962,16 @@ impl App {
         self.libraries_loaded = true;
         self.scan_complete = false;
         self.lutris = Some(Ok("Lutris detected".to_string()));
+        self.covers_missing = Some(Ok(vec![
+            backend::CoverGame {
+                slug: "hades-ii".to_string(),
+                name: "Hades II".to_string(),
+            },
+            backend::CoverGame {
+                slug: "baldurs-gate-3".to_string(),
+                name: "Baldur's Gate 3".to_string(),
+            },
+        ]));
         self.roots = vec!["/run/media/alex/Games".to_string()];
         self.candidates = vec![
             Candidate {
@@ -927,7 +1284,7 @@ impl App {
         parts.join(" · ")
     }
 
-    fn drain(&mut self) {
+    fn drain(&mut self, ctx: &egui::Context) {
         while let Ok(update) = self.receiver.try_recv() {
             match update {
                 Update::Libraries(Ok(scan)) => {
@@ -954,6 +1311,40 @@ impl App {
                 }
                 Update::Scanning((done, total)) => self.scanning = Some((done, total)),
                 Update::Lutris(result) => self.lutris = Some(result),
+                Update::Covers(result) => self.covers_missing = Some(result),
+                Update::CoverCandidates(result) => {
+                    if let Some(picker) = self.cover_picker.as_mut() {
+                        picker.candidates = Some(result);
+                    }
+                }
+                Update::CoverThumb {
+                    id,
+                    result: Ok(bytes),
+                } => {
+                    if let Ok(decoded) = image::load_from_memory(&bytes) {
+                        let rgba = decoded.to_rgba8();
+                        let size = [rgba.width() as usize, rgba.height() as usize];
+                        let image =
+                            egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                        let handle = ctx.load_texture(
+                            format!("cover-thumb-{id}"),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        if let Some(picker) = self.cover_picker.as_mut() {
+                            picker.thumbs.insert(id, handle);
+                        }
+                    }
+                }
+                Update::CoverThumb { result: Err(_), .. } => {}
+                Update::CoverNotice(Ok(())) => {
+                    self.covers_notice = Some("Cover saved. Restart Lutris to see it.".to_string());
+                    self.refresh_covers();
+                }
+                Update::CoverNotice(Err(message)) => {
+                    self.covers_notice = None;
+                    self.error = Some(message);
+                }
                 Update::Plan(Ok(plan)) => {
                     self.plan_id = Some(plan.fingerprint.clone());
                     self.plan = Some(plan);
@@ -971,7 +1362,12 @@ impl App {
                     self.storage_error = true;
                     self.error = Some(message);
                 }
-                Update::Event(phase) => self.phase = Some(phase),
+                Update::Event(phase) => {
+                    if let backend::Phase::Covers { done, total } = &phase {
+                        self.covers_progress = Some((*done, *total));
+                    }
+                    self.phase = Some(phase);
+                }
                 Update::Line(line) => {
                     // Bounded, so a long copy cannot grow this without limit.
                     // The tail is what matters, so the head is dropped.
@@ -995,6 +1391,12 @@ impl App {
                 Update::Done(ok) => {
                     self.busy = false;
                     self.finished = Some(ok);
+                    // A finished cover run brings the missing list up to date.
+                    if self.covers_busy {
+                        self.covers_busy = false;
+                        self.covers_progress = None;
+                        self.refresh_covers();
+                    }
                     if matches!(self.screen, Screen::Review { .. }) {
                         self.review_ok = Some(ok);
                     }
@@ -1176,7 +1578,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.drain();
+        self.drain(ctx);
         self.poll_chooser(ctx);
         if self.busy || self.scanning.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
@@ -1975,6 +2377,13 @@ impl App {
                 ui.add_space(10.0);
             }
             Some(Ok(_)) => {}
+        }
+
+        // Cover art belongs to Lutris, so it is only offered once Lutris is
+        // known to be there.
+        if matches!(self.lutris, Some(Ok(_))) {
+            self.cover_art_card(ui);
+            ui.add_space(10.0);
         }
 
         surface_card(ui, |ui| {
@@ -3307,6 +3716,8 @@ fn operation_stepper(
             Some(backend::Phase::Verifying) => 2,
             Some(backend::Phase::Committing) => 3,
             Some(backend::Phase::Applied) => 4,
+            // Covers run from the Lutris screen, not the running screen.
+            Some(backend::Phase::Covers { .. }) => 0,
             None => 0,
         }
     };

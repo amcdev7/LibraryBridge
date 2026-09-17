@@ -48,6 +48,20 @@ pub struct Options {
     /// Resolve it the other way: set the destination aside and copy the
     /// library's current compatdata over.
     pub replace_destination: bool,
+    /// `lutris covers`: a file holding the SteamGridDB API key.
+    pub apikey: Option<PathBuf>,
+    /// `lutris covers`: the one game to work on, when it is not all of them.
+    pub game: Option<String>,
+    /// `lutris covers`: search text to use instead of the game's name.
+    pub query: Option<String>,
+    /// `lutris covers`: a SteamGridDB id to use instead of the best match.
+    pub cover_match: Option<String>,
+    /// `lutris covers --list`: report what has no cover art and stop.
+    pub list_covers: bool,
+    /// `lutris covers --matches`: list candidates instead of fetching one.
+    pub matches: bool,
+    /// `lutris covers --overwrite`: replace a cover that is already there.
+    pub overwrite: bool,
 }
 
 // ---------------------------------------------------------------- scan

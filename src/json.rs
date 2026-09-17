@@ -48,6 +48,15 @@ impl Json {
         }
     }
 
+    /// A whole number, for ids that come back from an API. A negative or
+    /// fractional value is not one, and reading it as one would be a guess.
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Json::Number(value) if *value >= 0.0 && value.fract() == 0.0 => Some(*value as u64),
+            _ => None,
+        }
+    }
+
     /// String value of a key, for the common "read one field" case.
     pub fn string(&self, key: &str) -> Option<String> {
         self.get(key).and_then(|v| v.as_str()).map(str::to_string)

@@ -8,6 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::commands::{json_string, Options};
+use crate::covers;
 use crate::discover::{self, Candidate, Confidence};
 use crate::json::{self, Json};
 use crate::lutris::{self, Installation};
@@ -18,11 +19,14 @@ pub fn dispatch(options: &Options, arguments: &[String]) -> Result<i32, String> 
         Some("scan") => scan(options),
         Some("plan") => plan(options),
         Some("import") => import(options),
+        Some("covers") => covers(options),
         Some("forget") => forget(options),
         Some(other) => Err(format!(
-            "unknown lutris command '{other}'. Try detect, scan, plan, import or forget."
+            "unknown lutris command '{other}'. Try detect, scan, plan, import, covers or forget."
         )),
-        None => Err("lutris needs a command: detect, scan, plan, import or forget.".to_string()),
+        None => {
+            Err("lutris needs a command: detect, scan, plan, import, covers or forget.".to_string())
+        }
     }
 }
 
@@ -724,6 +728,303 @@ fn record_provenance(definition: &lutris::Definition, entry: &lutris::Entry) -> 
     );
     let path = dir.join(format!("{}.json", definition.slug));
     fs::write(&path, document).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+// -------------------------------------------------------------------- covers
+
+/// Fetch missing cover art from SteamGridDB.
+///
+/// Lutris resolves a game's cover as a file in its own `coverart` directory,
+/// named after the game's slug, so putting one there is all it takes. Nothing
+/// here reads or writes Lutris's database, and unlike the script this is
+/// adapted from, nothing is ever deleted: a cover left over for a game that is
+/// no longer installed is simply ignored.
+fn covers(options: &Options) -> Result<i32, String> {
+    let installation = require_lutris()?;
+    // The games Lutris itself lists, so leftovers in the config directory and
+    // two files for one game cannot show up as separate entries.
+    let all = covers::games(&installation);
+
+    // Listing is offline and needs no key: it only reports what is on disk.
+    if options.list_covers {
+        let missing: Vec<&covers::Game> =
+            all.iter().filter(|game| game.cover.is_none()).collect();
+        if options.json {
+            print!("{}", covers_list_json(&missing));
+            return Ok(0);
+        }
+        if missing.is_empty() {
+            println!("Every game in Lutris already has cover art.");
+            return Ok(0);
+        }
+        println!("{} of {} games have no cover art:", missing.len(), all.len());
+        for game in &missing {
+            println!("  {}  ({})", game.name, game.slug);
+        }
+        println!();
+        println!("Fetch them with:");
+        println!("    librarybridge lutris covers");
+        return Ok(0);
+    }
+
+    let key = covers::read_key(options.apikey.as_deref()).ok_or_else(|| {
+        format!(
+            "no SteamGridDB API key. Get one free at \
+             https://www.steamgriddb.com/profile/preferences/api, then set SGDB_API_KEY, pass \
+             --apikey PATH, or save it to {}.",
+            covers::key_path().display()
+        )
+    })?;
+
+    // A pinned id is checked once, not per game, so a typo fails immediately.
+    let wanted_id: Option<u64> = match &options.cover_match {
+        Some(value) => Some(
+            value
+                .parse()
+                .map_err(|_| format!("--match takes a SteamGridDB id (a number), not '{value}'"))?,
+        ),
+        None => None,
+    };
+    // Picking a cover by id is an explicit choice, so it replaces whatever is
+    // there without also needing --overwrite.
+    let replace = options.overwrite || wanted_id.is_some();
+
+    let targets: Vec<covers::Game> = match &options.game {
+        Some(wanted) => {
+            let matches: Vec<&covers::Game> = all
+                .iter()
+                .filter(|game| game.slug == *wanted || game.slug.starts_with(wanted.as_str()))
+                .collect();
+            match matches.len() {
+                1 => vec![matches[0].clone()],
+                0 => {
+                    return Err(format!(
+                        "no Lutris game matches '{wanted}'. Run `librarybridge lutris covers \
+                         --list` to see the slugs."
+                    ))
+                }
+                count => {
+                    return Err(format!("'{wanted}' matches {count} games. Use the full slug."))
+                }
+            }
+        }
+        None => all
+            .iter()
+            .filter(|game| replace || game.cover.is_none())
+            .cloned()
+            .collect(),
+    };
+
+    if targets.is_empty() {
+        println!("Every game in Lutris already has cover art.");
+        return Ok(0);
+    }
+
+    // `--matches` looks candidates up and downloads nothing.
+    if options.matches {
+        let entry = &targets[0];
+        let query = options.query.clone().unwrap_or_else(|| entry.name.clone());
+        let mut found = covers::search(&key, &query)?;
+        found.truncate(covers::MAX_MATCHES);
+        covers::with_thumbnails(&key, &mut found);
+        if options.json {
+            print!("{}", covers_matches_json(entry, &query, &found));
+            return Ok(0);
+        }
+        if found.is_empty() {
+            println!("SteamGridDB has no match for '{query}'.");
+            return Ok(0);
+        }
+        println!("Matches for {} (searching \"{query}\"):", entry.name);
+        for candidate in &found {
+            println!("  [{}] {}", candidate.id, candidate.name);
+        }
+        println!();
+        println!("Use one with:");
+        println!(
+            "    librarybridge lutris covers --game {} --match {}",
+            entry.slug, found[0].id
+        );
+        return Ok(0);
+    }
+
+    let total = targets.len();
+    let mut saved = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    let mut finished = 0usize;
+
+    if !options.json {
+        println!("Cover art for {total} game(s)");
+    }
+
+    for entry in &targets {
+        finished += 1;
+        if !replace && covers::existing(&installation, &entry.slug).is_some() {
+            if !options.json {
+                println!("  {:<44} already has one", entry.name);
+            }
+            skipped += 1;
+            emit_cover(options, entry, "exists", finished, total);
+            continue;
+        }
+
+        let query = options.query.clone().unwrap_or_else(|| entry.name.clone());
+        let found = match covers::search(&key, &query) {
+            Ok(found) => found,
+            Err(error) => {
+                failed += 1;
+                report_cover_failure(options, entry, &error);
+                emit_cover(options, entry, "failed", finished, total);
+                continue;
+            }
+        };
+        pause();
+
+        let chosen = match wanted_id {
+            Some(id) => found.iter().find(|candidate| candidate.id == id).cloned(),
+            None => covers::best_match(&found, &entry.name).cloned(),
+        };
+        let Some(chosen) = chosen else {
+            failed += 1;
+            report_cover_failure(
+                options,
+                entry,
+                &format!("no SteamGridDB match for '{query}'"),
+            );
+            emit_cover(options, entry, "no_match", finished, total);
+            continue;
+        };
+
+        let art = match covers::art(&key, chosen.id) {
+            Ok(Some(art)) => art,
+            Ok(None) => {
+                failed += 1;
+                report_cover_failure(
+                    options,
+                    entry,
+                    &format!("\"{}\" has no vertical cover", chosen.name),
+                );
+                emit_cover(options, entry, "no_cover", finished, total);
+                continue;
+            }
+            Err(error) => {
+                failed += 1;
+                report_cover_failure(options, entry, &error);
+                emit_cover(options, entry, "failed", finished, total);
+                continue;
+            }
+        };
+        pause();
+
+        if options.dry_run {
+            if !options.json {
+                println!("  {:<44} would use \"{}\"", entry.name, chosen.name);
+            }
+            skipped += 1;
+            emit_cover(options, entry, "dry_run", finished, total);
+            continue;
+        }
+
+        match covers::place(&installation, &entry.slug, &art) {
+            Ok(_) => {
+                saved += 1;
+                if !options.json {
+                    println!("  {:<44} saved from \"{}\"", entry.name, chosen.name);
+                }
+                emit_cover(options, entry, "saved", finished, total);
+            }
+            Err(error) => {
+                failed += 1;
+                report_cover_failure(options, entry, &error);
+                emit_cover(options, entry, "failed", finished, total);
+            }
+        }
+    }
+
+    if options.json {
+        emit(
+            options,
+            "covers_done",
+            &[
+                ("saved", saved.to_string()),
+                ("skipped", skipped.to_string()),
+                ("failed", failed.to_string()),
+            ],
+        );
+    } else {
+        println!();
+        println!("{saved} saved, {skipped} skipped, {failed} with no cover found.");
+        println!("Restart Lutris to see them.");
+    }
+    Ok(if saved == 0 && failed > 0 { 2 } else { 0 })
+}
+
+/// The pause between calls, to stay inside SteamGridDB's rate limit.
+fn pause() {
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}
+
+fn report_cover_failure(options: &Options, game: &covers::Game, reason: &str) {
+    if !options.json {
+        println!("  {:<44} {reason}", game.name);
+    }
+}
+
+fn emit_cover(options: &Options, game: &covers::Game, status: &str, done: usize, total: usize) {
+    emit(
+        options,
+        "cover",
+        &[
+            ("slug", quote(&game.slug)),
+            ("name", quote(&game.name)),
+            ("status", quote(status)),
+            ("done", done.to_string()),
+            ("total", total.to_string()),
+        ],
+    );
+}
+
+fn covers_list_json(missing: &[&covers::Game]) -> String {
+    let rows: Vec<String> = missing
+        .iter()
+        .map(|game| {
+            format!(
+                "    {{\"slug\": {}, \"name\": {}}}",
+                quote(&game.slug),
+                quote(&game.name)
+            )
+        })
+        .collect();
+    format!(
+        "{{\n  \"schema\": 1,\n  \"missing\": [\n{}\n  ]\n}}\n",
+        rows.join(",\n")
+    )
+}
+
+fn covers_matches_json(game: &covers::Game, query: &str, found: &[covers::Match]) -> String {
+    let rows: Vec<String> = found
+        .iter()
+        .map(|candidate| {
+            format!(
+                "    {{\"id\": {}, \"name\": {}, \"thumb\": {}}}",
+                candidate.id,
+                quote(&candidate.name),
+                match &candidate.thumb {
+                    Some(thumb) => quote(thumb),
+                    None => "null".to_string(),
+                }
+            )
+        })
+        .collect();
+    format!(
+        "{{\n  \"schema\": 1,\n  \"slug\": {},\n  \"name\": {},\n  \"query\": {},\n  \
+         \"matches\": [\n{}\n  ]\n}}\n",
+        quote(&game.slug),
+        quote(&game.name),
+        quote(query),
+        rows.join(",\n")
+    )
 }
 
 // -------------------------------------------------------------------- forget

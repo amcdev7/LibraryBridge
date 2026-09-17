@@ -2,6 +2,7 @@
 //! onto a filesystem that can, without ever deleting the original.
 
 mod commands;
+mod covers;
 mod discover;
 mod evidence;
 mod fsops;
@@ -44,6 +45,7 @@ COMMANDS
     lutris scan          Find installed games that Lutris does not have
     lutris plan          Write a reviewable import file for chosen games
     lutris import        Hand that file to Lutris, one dialog per game
+    lutris covers        Fetch missing cover art from SteamGridDB
     lutris forget        Drop LibraryBridge's record of an import
 
 OPTIONS
@@ -55,6 +57,13 @@ OPTIONS
     --output PATH        Where `lutris plan` writes its file
     --plan PATH          Plan file for `lutris import`
     --entry SLUG         Import record for `lutris forget`
+    --apikey PATH        File holding the SteamGridDB API key for `lutris covers`
+    --game SLUG          One game for `lutris covers` instead of all of them
+    --query TEXT         Search text for `lutris covers`, instead of the name
+    --match ID           SteamGridDB id to use instead of the best match
+    --list               For `lutris covers`: report what is missing and stop
+    --matches            For `lutris covers`: list candidates, fetch nothing
+    --overwrite          For `lutris covers`: replace a cover already there
     --all                Include games Lutris already has
     --json               Machine-readable output
     -n, --dry-run        Show what would happen and stop
@@ -72,6 +81,8 @@ NOTES
     Nothing is ever deleted. `fix` renames your original compatdata to
     compatdata.backup beside itself and leaves it there.
     Close Steam before repairing.
+    `lutris covers` needs a free SteamGridDB API key: save one to
+    <data home>/librarybridge/sgdb-api-key, or set SGDB_API_KEY, or use --apikey.
 ";
 
 fn main() -> ExitCode {
@@ -101,6 +112,13 @@ fn main() -> ExitCode {
         record: None,
         keep_destination: false,
         replace_destination: false,
+        apikey: None,
+        game: None,
+        query: None,
+        cover_match: None,
+        list_covers: false,
+        matches: false,
+        overwrite: false,
     };
     let mut positional: Vec<String> = Vec::new();
     let mut index = 0;
@@ -123,8 +141,12 @@ fn main() -> ExitCode {
             "--all" => options.all = true,
             "--keep-destination" => options.keep_destination = true,
             "--replace-destination" => options.replace_destination = true,
+            "--list" => options.list_covers = true,
+            "--matches" => options.matches = true,
+            "--overwrite" => options.overwrite = true,
             "--steam-root" | "--data-dir" | "--root" | "--candidate" | "--output" | "--plan"
-            | "--entry" | "--expect" | "--record" => {
+            | "--entry" | "--expect" | "--record" | "--apikey" | "--game" | "--query"
+            | "--match" => {
                 index += 1;
                 let Some(value) = arguments.get(index) else {
                     return usage_error(&format!("{argument} needs a value"));
@@ -140,6 +162,10 @@ fn main() -> ExitCode {
                     "--plan" => options.plan = Some(PathBuf::from(original)),
                     "--expect" => options.expect = Some(value.clone()),
                     "--record" => options.record = Some(value.clone()),
+                    "--apikey" => options.apikey = Some(PathBuf::from(original)),
+                    "--game" => options.game = Some(value.clone()),
+                    "--query" => options.query = Some(value.clone()),
+                    "--match" => options.cover_match = Some(value.clone()),
                     _ => options.entry = Some(value.clone()),
                 }
             }
@@ -245,6 +271,15 @@ fn misplaced_flags(positional: &[String], arguments: &[String]) -> Option<String
         ("lutris", "detect") => &[],
         ("lutris", "plan") => &["--root", "--candidate", "--output"],
         ("lutris", "import") => &["--plan", "-y", "--yes"],
+        ("lutris", "covers") => &[
+            "--apikey",
+            "--game",
+            "--query",
+            "--match",
+            "--list",
+            "--matches",
+            "--overwrite",
+        ],
         ("lutris", "forget") => &["--entry"],
         _ => return None,
     };
